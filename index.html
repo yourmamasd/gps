@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Photo Map Calibration</title>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; display: flex; flex-direction: column; height: 100vh; }
+        #controls { background: #222; padding: 10px; display: flex; justify-content: space-between; align-items: center; z-index: 10; }
+        #canvas-container { flex-grow: 1; position: relative; overflow: hidden; cursor: crosshair; }
+        canvas { display: block; }
+        button { background: #00ffa2; border: none; padding: 10px 15px; border-radius: 5px; font-weight: bold; }
+        .status-bar { position: absolute; bottom: 0; width: 100%; background: rgba(0,0,0,0.7); font-size: 12px; padding: 5px; pointer-events: none; }
+        #file-input { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <button onclick="document.getElementById('file-input').click()">Upload Map</button>
+    <div id="mode-text">Step 1: Upload Photo</div>
+    <button id="gps-btn" onclick="recordPoint()" style="display:none;">Record GPS & Tap Image</button>
+</div>
+
+<div id="canvas-container">
+    <canvas id="mapCanvas"></canvas>
+    <div class="status-bar" id="stats">Waiting for image...</div>
+</div>
+
+<input type="file" id="file-input" accept="image/*">
+
+<script>
+    const canvas = document.getElementById('mapCanvas');
+    const ctx = canvas.getContext('2d');
+    const stats = document.getElementById('stats');
+    const modeText = document.getElementById('mode-text');
+    const gpsBtn = document.getElementById('gps-btn');
+
+    let img = new Image();
+    let calibrationPoints = []; // Stores {lat, lon, x, y}
+    let currentGPS = { lat: 0, lon: 0, heading: 0 };
+    let isReady = false;
+
+    // 1. Handle Image Upload
+    document.getElementById('file-input').onchange = (e) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            img.onload = () => {
+                resizeCanvas();
+                saveData(); // Save image string
+                startCalibration();
+            };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(e.target.files[0]);
+    };
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight - document.getElementById('controls').offsetHeight;
+        draw();
+    }
+
+    // 2. Calibration Logic
+    function startCalibration() {
+        calibrationPoints = [];
+        gpsBtn.style.display = 'block';
+        modeText.innerText = "Point 1: Tap where you are standing";
+    }
+
+    async function recordPoint() {
+        navigator.geolocation.getCurrentPosition((pos) => {
+            currentGPS.lat = pos.coords.latitude;
+            currentGPS.lon = pos.coords.longitude;
+            stats.innerText = `GPS Locked: ${currentGPS.lat.toFixed(5)}, ${currentGPS.lon.toFixed(5)}. Now TAP the image.`;
+        }, err => alert("Enable GPS"), {enableHighAccuracy: true});
+    }
+
+    canvas.onclick = (e) => {
+    if (img.src && calibrationPoints.length < 3) {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        // Add the new point
+        calibrationPoints.push({ lat: currentGPS.lat, lon: currentGPS.lon, x, y });
+        
+        // SAVE IMMEDIATELY after every point added
+        saveData(); 
+
+        if (calibrationPoints.length < 3) {
+            modeText.innerText = `Point ${calibrationPoints.length + 1}: Move, click Record, then Tap.`;
+        } else {
+            modeText.innerText = "✅ Calibrated!";
+            gpsBtn.style.display = 'none';
+            isReady = true;
+        }
+        draw();
+    }
+    };
+
+    // 3. Mapping Math (Simplified Affine Transform logic)
+    function gpsToPixels(lat, lon) {
+        if (calibrationPoints.length < 3) return null;
+
+        // Basic linear interpolation based on the first two points for scale/rotation
+        // (A full 3-point affine transform is complex, but this gets the 'direction' right)
+        const p1 = calibrationPoints[0];
+        const p2 = calibrationPoints[1];
+
+        const latScale = (p2.x - p1.x) / (p2.lat - p1.lat);
+        const lonScale = (p2.y - p1.y) / (p2.lon - p1.lon);
+
+        const x = p1.x + (lat - p1.lat) * latScale;
+        const y = p1.y + (lon - p1.lon) * lonScale;
+
+        return { x, y };
+    }
+
+    // 4. Drawing Loop
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (img.src) {
+            // Draw image fit to screen
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        }
+
+        // Draw calibrated points
+        calibrationPoints.forEach((p, i) => {
+            ctx.fillStyle = "red";
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillText(i + 1, p.x + 8, p.y);
+        });
+
+        // Draw User Location & Heading
+        if (isReady) {
+            const pos = gpsToPixels(currentGPS.lat, currentGPS.lon);
+            if (pos) {
+                ctx.save();
+                ctx.translate(pos.x, pos.y);
+                ctx.rotate((currentGPS.heading * Math.PI) / 180);
+                
+                // Draw Arrow
+                ctx.fillStyle = "#00ffa2";
+                ctx.beginPath();
+                ctx.moveTo(0, -15);
+                ctx.lineTo(10, 10);
+                ctx.lineTo(-10, 10);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+        requestAnimationFrame(draw);
+    }
+
+    // 5. Sensors & Persistence
+    function saveData() {
+        const data = {
+            points: calibrationPoints,
+            imgSrc: img.src
+        };
+        localStorage.setItem('mapData', JSON.stringify(data));
+    }
+
+    function loadData() {
+        const saved = localStorage.getItem('mapData');
+        if (saved) {
+            const data = JSON.parse(saved);
+            calibrationPoints = data.points;
+            if (data.imgSrc) {
+                img.src = data.imgSrc;
+                img.onload = () => {
+                    if (calibrationPoints.length >= 3) {
+                        isReady = true;
+                        modeText.innerText = "Ready";
+                    }
+                    resizeCanvas();
+                };
+            }
+        }
+    }
+
+    // Real-time tracking
+    navigator.geolocation.watchPosition(pos => {
+        currentGPS.lat = pos.coords.latitude;
+        currentGPS.lon = pos.coords.longitude;
+    }, null, {enableHighAccuracy: true});
+
+    window.addEventListener('deviceorientationabsolute', e => {
+        if (e.alpha !== null) currentGPS.heading = 360 - e.alpha;
+    }, true);
+
+    window.onresize = resizeCanvas;
+    loadData();
+    draw();
+</script>
+</body>
+</html>
