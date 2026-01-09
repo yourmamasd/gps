@@ -6,24 +6,35 @@
     <title>Photo Map Calibration</title>
     <style>
         body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; display: flex; flex-direction: column; height: 100vh; }
-        #controls { background: #222; padding: 10px; display: flex; justify-content: space-between; align-items: center; z-index: 10; }
-        #canvas-container { flex-grow: 1; position: relative; overflow: hidden; cursor: crosshair; }
+        #controls { background: #222; padding: 10px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; z-index: 10; gap: 10px; }
+        #canvas-container { flex-grow: 1; position: relative; overflow: hidden; touch-action: none; background: #111; }
         canvas { display: block; }
-        button { background: #00ffa2; border: none; padding: 10px 15px; border-radius: 5px; font-weight: bold; }
-        .status-bar { position: absolute; bottom: 0; width: 100%; background: rgba(0,0,0,0.7); font-size: 12px; padding: 5px; pointer-events: none; }
+        button { background: #00ffa2; border: none; padding: 10px 12px; border-radius: 5px; font-weight: bold; color: #000; cursor: pointer; }
+        button.reset { background: #ff4444; color: white; }
+        .zoom-ctrl { display: flex; align-items: center; gap: 5px; background: rgba(255,255,255,0.1); padding: 5px 10px; border-radius: 5px; }
+        .status-bar { position: absolute; bottom: 0; width: 100%; background: rgba(0,0,0,0.8); font-size: 12px; padding: 8px; pointer-events: none; border-top: 1px solid #444; }
         #file-input { display: none; }
     </style>
 </head>
 <body>
 
 <div id="controls">
-    <button onclick="document.getElementById('file-input').click()">Upload Map</button>
-    <div id="mode-text">Step 1: Upload Photo</div>
-    <button id="gps-btn" onclick="recordPoint()" style="display:none;">Record GPS & Tap Image</button>
+    <div style="display: flex; gap: 5px;">
+        <button onclick="document.getElementById('file-input').click()">Upload</button>
+        <button class="reset" onclick="resetAll()">Reset</button>
+    </div>
+    
+    <div class="zoom-ctrl">
+        <label>Zoom</label>
+        <input type="range" id="zoomRange" min="1" max="5" step="0.1" value="1">
+    </div>
+
+    <button id="gps-btn" onclick="requestGPS()" style="display:none;">Record GPS</button>
 </div>
 
 <div id="canvas-container">
     <canvas id="mapCanvas"></canvas>
+    <div id="mode-text" style="position:absolute; top:10px; left:10px; background:rgba(0,0,0,0.6); padding:5px; border-radius:3px;">Step 1: Upload Photo</div>
     <div class="status-bar" id="stats">Waiting for image...</div>
 </div>
 
@@ -35,19 +46,28 @@
     const stats = document.getElementById('stats');
     const modeText = document.getElementById('mode-text');
     const gpsBtn = document.getElementById('gps-btn');
+    const zoomRange = document.getElementById('zoomRange');
 
     let img = new Image();
-    let calibrationPoints = []; // Stores {lat, lon, x, y}
-    let currentGPS = { lat: 0, lon: 0, heading: 0 };
+    let calibrationPoints = []; 
+    let currentGPS = { lat: 0, lon: 0, heading: 0, accuracy: 0 };
     let isReady = false;
+
+    // View State (Zoom/Pan)
+    let scale = 1;
+    let offsetX = 0;
+    let offsetY = 0;
+    let isDragging = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
 
     // 1. Handle Image Upload
     document.getElementById('file-input').onchange = (e) => {
         const reader = new FileReader();
         reader.onload = (event) => {
             img.onload = () => {
-                resizeCanvas();
-                saveData(); // Save image string
+                resetView();
+                saveData(); 
                 startCalibration();
             };
             img.src = event.target.result;
@@ -55,56 +75,97 @@
         reader.readAsDataURL(e.target.files[0]);
     };
 
+    function resetView() {
+        scale = 1;
+        offsetX = 0;
+        offsetY = 0;
+        zoomRange.value = 1;
+        resizeCanvas();
+    }
+
     function resizeCanvas() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight - document.getElementById('controls').offsetHeight;
-        draw();
     }
 
-    // 2. Calibration Logic
+    // 2. Calibration & GPS Logic
     function startCalibration() {
         calibrationPoints = [];
         gpsBtn.style.display = 'block';
-        modeText.innerText = "Point 1: Tap where you are standing";
+        modeText.innerText = "Point 1: Tap GPS button then tap map";
     }
 
-    async function recordPoint() {
+    function requestGPS() {
         navigator.geolocation.getCurrentPosition((pos) => {
             currentGPS.lat = pos.coords.latitude;
             currentGPS.lon = pos.coords.longitude;
-            stats.innerText = `GPS Locked: ${currentGPS.lat.toFixed(5)}, ${currentGPS.lon.toFixed(5)}. Now TAP the image.`;
-        }, err => alert("Enable GPS"), {enableHighAccuracy: true});
+            currentGPS.accuracy = pos.coords.accuracy;
+            stats.innerText = `GPS Fixed (Acc: ${currentGPS.accuracy.toFixed(1)}m). Now TAP your location on map.`;
+            gpsBtn.style.background = "white";
+        }, err => alert("Please enable Location Services"), {enableHighAccuracy: true});
     }
+
+    // 3. Coordinate Math (Handling Zoom/Pan)
+    canvas.addEventListener('pointerdown', (e) => {
+        isDragging = true;
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+    });
+
+    window.addEventListener('pointerup', () => isDragging = false);
+
+    window.addEventListener('pointermove', (e) => {
+        if (isDragging) {
+            offsetX += e.clientX - lastMouseX;
+            offsetY += e.clientY - lastMouseY;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+        }
+    });
 
     canvas.onclick = (e) => {
-    if (img.src && calibrationPoints.length < 3) {
-        const rect = canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
+        // Prevent calibration tap if we were just dragging/panning
+        if (Math.abs(e.clientX - lastMouseX) > 5 || Math.abs(e.clientY - lastMouseY) > 5) return;
 
-        // Add the new point
-        calibrationPoints.push({ lat: currentGPS.lat, lon: currentGPS.lon, x, y });
-        
-        // SAVE IMMEDIATELY after every point added
-        saveData(); 
+        if (img.src && calibrationPoints.length < 3) {
+            if (currentGPS.lat === 0) {
+                alert("Click 'Record GPS' first!");
+                return;
+            }
 
-        if (calibrationPoints.length < 3) {
-            modeText.innerText = `Point ${calibrationPoints.length + 1}: Move, click Record, then Tap.`;
-        } else {
-            modeText.innerText = "✅ Calibrated!";
-            gpsBtn.style.display = 'none';
-            isReady = true;
+            const rect = canvas.getBoundingClientRect();
+            // Transform screen click to image coordinates
+            const x = (e.clientX - rect.left - offsetX) / scale;
+            const y = (e.clientY - rect.top - offsetY) / scale;
+
+            calibrationPoints.push({ lat: currentGPS.lat, lon: currentGPS.lon, x, y });
+            gpsBtn.style.background = "#00ffa2";
+            saveData(); 
+
+            if (calibrationPoints.length < 3) {
+                modeText.innerText = `Point ${calibrationPoints.length + 1}: Move, Record, then Tap.`;
+            } else {
+                modeText.innerText = "✅ Calibrated!";
+                gpsBtn.style.display = 'none';
+                isReady = true;
+            }
         }
-        draw();
-    }
     };
 
-    // 3. Mapping Math (Simplified Affine Transform logic)
-    function gpsToPixels(lat, lon) {
-        if (calibrationPoints.length < 3) return null;
+    zoomRange.oninput = (e) => {
+        scale = parseFloat(e.target.value);
+    };
 
-        // Basic linear interpolation based on the first two points for scale/rotation
-        // (A full 3-point affine transform is complex, but this gets the 'direction' right)
+    function resetAll() {
+        if(confirm("Clear all data and image?")) {
+            localStorage.removeItem('mapData');
+            location.reload();
+        }
+    }
+
+    // 4. Mapping Math
+    function gpsToPixels(lat, lon) {
+        if (calibrationPoints.length < 2) return null;
         const p1 = calibrationPoints[0];
         const p2 = calibrationPoints[1];
 
@@ -117,65 +178,69 @@
         return { x, y };
     }
 
-    // 4. Drawing Loop
+    // 5. Drawing Loop
     function draw() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.save();
+        ctx.translate(offsetX, offsetY);
+        ctx.scale(scale, scale);
+
         if (img.src) {
-            // Draw image fit to screen
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
         }
 
-        // Draw calibrated points
+        // Points
         calibrationPoints.forEach((p, i) => {
             ctx.fillStyle = "red";
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.fillText(i + 1, p.x + 8, p.y);
+            ctx.beginPath(); ctx.arc(p.x, p.y, 8 / scale, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "white";
+            ctx.font = `${14/scale}px Arial`;
+            ctx.fillText(i + 1, p.x + (10/scale), p.y);
         });
 
-        // Draw User Location & Heading
-        if (isReady) {
+        // User Marker
+        if (isReady || (currentGPS.lat !== 0 && calibrationPoints.length >= 2)) {
             const pos = gpsToPixels(currentGPS.lat, currentGPS.lon);
             if (pos) {
                 ctx.save();
                 ctx.translate(pos.x, pos.y);
                 ctx.rotate((currentGPS.heading * Math.PI) / 180);
-                
-                // Draw Arrow
                 ctx.fillStyle = "#00ffa2";
                 ctx.beginPath();
-                ctx.moveTo(0, -15);
-                ctx.lineTo(10, 10);
-                ctx.lineTo(-10, 10);
+                ctx.moveTo(0, -15/scale);
+                ctx.lineTo(10/scale, 10/scale);
+                ctx.lineTo(-10/scale, 10/scale);
                 ctx.closePath();
                 ctx.fill();
                 ctx.restore();
             }
         }
+        ctx.restore();
         requestAnimationFrame(draw);
     }
 
-    // 5. Sensors & Persistence
     function saveData() {
-        const data = {
-            points: calibrationPoints,
-            imgSrc: img.src
-        };
-        localStorage.setItem('mapData', JSON.stringify(data));
+        try {
+            const data = { points: calibrationPoints, imgSrc: img.src };
+            localStorage.setItem('mapData', JSON.stringify(data));
+        } catch (e) {
+            console.warn("Storage full, saving points only.");
+            localStorage.setItem('mapData', JSON.stringify({points: calibrationPoints}));
+        }
     }
 
     function loadData() {
         const saved = localStorage.getItem('mapData');
         if (saved) {
             const data = JSON.parse(saved);
-            calibrationPoints = data.points;
+            calibrationPoints = data.points || [];
             if (data.imgSrc) {
                 img.src = data.imgSrc;
                 img.onload = () => {
                     if (calibrationPoints.length >= 3) {
                         isReady = true;
-                        modeText.innerText = "Ready";
+                        modeText.innerText = "Tracking Active";
                     }
                     resizeCanvas();
                 };
@@ -183,10 +248,10 @@
         }
     }
 
-    // Real-time tracking
     navigator.geolocation.watchPosition(pos => {
         currentGPS.lat = pos.coords.latitude;
         currentGPS.lon = pos.coords.longitude;
+        currentGPS.accuracy = pos.coords.accuracy;
     }, null, {enableHighAccuracy: true});
 
     window.addEventListener('deviceorientationabsolute', e => {
